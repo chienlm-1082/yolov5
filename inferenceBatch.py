@@ -14,6 +14,7 @@ from utils.general import check_img_size, check_requirements, check_imshow, non_
 from utils.plots import plot_one_box
 from utils.torch_utils import select_device, load_classifier, time_synchronized
 import numpy as np
+from tqdm import tqdm
 device = '0'
 device =select_device(device)
 import os
@@ -29,7 +30,7 @@ def load_model(weights_path, device):
 
 
 
-def gen_batch(images: list, img_size, stride, device):
+def gen_batch(images: list, img_size, stride, device, batch_size=32):
     def process(img):
         img = img[:, :, ::-1].transpose(2, 0, 1)  # BGR to RGB, to 3x416x416
         img = np.ascontiguousarray(img)
@@ -41,52 +42,65 @@ def gen_batch(images: list, img_size, stride, device):
     
     imgs = [letterbox(x, img_size, stride=stride)[0] for x in images]
     imgs = list(map(process, imgs))
-    imgs = torch.stack(imgs)
-    return imgs
+    if len(imgs) % batch_size == 0:
+        num_batch =len(imgs) // batch_size
+    else:
+        if len(imgs) < batch_size:
+            num_batch  = 1
+        else:
+            num_batch = len(imgs) // batch_size + 1
+    batchs = []
+    for idx in range(num_batch):
+        batchs.append(torch.stack(imgs[batch_size*idx : batch_size*(idx+1)]))
+#     imgs = torch.stack(imgs)
+    print("Len of batchs: ", len(batchs))
+    return batchs
 
 
-def predict(model, imgs, images, conf_thres=0.5, iou_thres=0.45):
-    t1 = time_synchronized()
-    pred = model(imgs, augment=True)[0]
-
-    # Apply NMS
-    pred = non_max_suppression(pred, conf_thres, iou_thres, classes=0, agnostic=1)
-    # print(pred)
-    t2 = time_synchronized()
-    print("Inference time: ", t2-t1)
+def predict(model, imgs, images, conf_thres=0.5, iou_thres=0.45, batchs=None):
     all_boxes = []
-    for idx, det in enumerate(pred):
-        print("===========================================================================")
-        if len(det):
-            det[:, :4] = scale_coords(imgs[idx].shape[1:], det[:, :4], images[idx].shape).round()
-            print(det.cpu().numpy())
-            all_boxes.append(det.cpu().numpy())
+    for idx in tqdm(range(len(batchs))):
+        imgs = batchs[idx]
+        t1 = time_synchronized()
+        pred = model(imgs, augment=True)[0]
+
+        # Apply NMS
+        pred = non_max_suppression(pred, conf_thres, iou_thres, classes=0, agnostic=1)
+        t2 = time_synchronized()
+        for idx, det in enumerate(pred):
+            if len(det):
+                det[:, :4] = scale_coords(imgs[idx].shape[1:], det[:, :4], images[0].shape).round()
+                all_boxes.append(det.cpu().numpy())
     return all_boxes
 
 if __name__ == '__main__':
+    img_size = (1700, 2200)
     weights_path = "pretrained_table_yolov5l.pt"
     model, stride = load_model(weights_path, device)
-    path_images = 'Data_test/'
+    path_images = 'one_image/'
     list_images = os.listdir(path_images)
     list_images = sorted(list_images)
-    print(list_images)
+#     print(list_images)
     images = []
     print(len(list_images))
-    for path in list_images:
+    for path in list_images[:300]:
         img = cv2.imread(path_images+path)
         if img is not None:
-            images.append(cv2.resize(img, (600, 900)))
-    imgs = gen_batch(images, 640, stride, device)
-
+            images.append(cv2.resize(img, img_size))
+    start = time.time()
+    batchs = gen_batch(images[:100], 640, stride, device, batch_size=8)
+    print("Time to generate batch: ", time.time() - start)
     with torch.no_grad():
-        all_boxes = predict(model, imgs, images)
+        all_boxes = predict(model, None, images, batchs=batchs)
     for idx, img_boxes in enumerate(all_boxes):
         img = cv2.imread(path_images+list_images[idx])
-        img = cv2.resize(img, (600, 900))
+        img = cv2.resize(img, img_size)
         for box in img_boxes:
             if len(box):
-                print(box)
-                img = cv2.rectangle(img, (int(box[0]), int(box[1])), (int(box[2]), int(box[3])), (0, 255, 0), 1)
+                img = cv2.rectangle(img, (int(box[0]), int(box[1])), (int(box[2]), int(box[3])), (0, 0, 255), 2)
+                padding = 30
+                table_area = img[int(box[1]) - padding  : int(box[3]) + padding, int(box[0]) - padding : int(box[2]) + padding]
+#                 cv2.imwrite("Test_detect.png", table_area)
         cv2.imwrite("Results_inference/"+list_images[idx], img)
         
 
